@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prueba-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: prueba
+  template:
+    metadata:
+      labels:
+        app: prueba
+    spec:
+      containers:
+      - name: prueba
+        image: pruebacr.azurecr.io/prueba:$(Build.BuildId)
+        env:
+        - name: API_PORT
+          value: "8000"
+        - name: TOKEN_KEY
+          value: "myperonalandwonderfulKey"
+        #command: [ "/bin/bash", "-c", "--" ]
+        #args: [ "while true; do sleep 30; done;" ]
+        ports:
+        - containerPort: 8000
+# service type loadbalancer       
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prueba-svc
+spec:
+  selector:
+    app: prueba
+  ports:
+    - protocol: TCP
+      port: 3000
+      targetPort: 8000
+  type: LoadBalancer

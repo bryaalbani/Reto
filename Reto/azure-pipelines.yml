@@ -1,0 +1,133 @@
+trigger:
+- main
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+- stage: build
+  displayName: 'Build'
+  jobs:
+
+  - job: build_IaC_Artifact
+    displayName: 'Copy Files to IaC Artifact'
+    steps:
+
+    - task: CopyFiles@2
+      inputs:
+        SourceFolder: 'IAC/'
+        Contents: '*.tf'
+        TargetFolder: '$(build.artifactstagingdirectory)'
+
+    - task: replacetokens@5
+      inputs:
+        targetFiles: '*.yaml'
+        encoding: 'auto'
+        tokenPattern: 'azpipelines'
+        writeBOM: true
+        actionOnMissing: 'warn'
+        keepToken: false
+        actionOnNoFiles: 'continue'
+        enableTransforms: false
+        enableRecursion: false
+        useLegacyPattern: false
+        enableTelemetry: true
+
+    - task: CopyFiles@2
+      inputs:
+        SourceFolder: ''
+        Contents: '*.yaml'
+        TargetFolder: '$(build.artifactstagingdirectory)'    
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'iac_artifact'
+        publishLocation: 'Container'
+
+  - job: build_Artifact
+    displayName: 'Build Docker Artifact'
+    steps:
+
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'pruebacr'
+        repository: 'prueba'
+        command: 'buildAndPush'
+        Dockerfile: '**/*dockerfile'
+        
+
+- stage: CD
+  displayName: 'CD'
+  jobs:
+
+  - job: Deploy
+    displayName: 'Create Resources'
+    steps:
+
+    - task: DownloadBuildArtifacts@0
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'iac_artifact'
+        downloadPath: '$(System.ArtifactsDirectory)'
+
+    - task: TerraformInstaller@0
+      inputs:
+        terraformVersion: 'latest'
+
+    - task: TerraformTaskV2@2
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.ArtifactsDirectory)/iac_artifact'
+        backendServiceArm: 'Azure subscription 1(757fc6c5-fbc8-4bdd-80d5-e3faf2137870)'
+        backendAzureRmResourceGroupName: 'StorageAccount-ResourceGroup'
+        backendAzureRmStorageAccountName: 'tfstateprodprueba'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'prod.terraform.tfstate'
+    
+    - task: TerraformTaskV2@2
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(System.ArtifactsDirectory)/iac_artifact'
+        commandOptions: '-out=tfplan'
+        environmentServiceNameAzureRM: 'Azure subscription 1(757fc6c5-fbc8-4bdd-80d5-e3faf2137870)'
+    
+    - task: PowerShell@2
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Write-Host "LASTEXITCODE : $LASTEXITCODE"
+          $plan = $(terraform show -json tfplan | ConvertFrom-Json)
+          $actions = $plan.resource_changes.change.actions
+          Write-Host "Terraform actions : $actions"
+          if (($actions -contains 'create') -or ($actions -contains 'delete') -or ($actions -contains 'update'))
+          {
+                Write-Host "Terraform will perform the following actions : $actions"
+                Write-Host "##vso[task.setvariable variable=anyTfChanges;]true"
+          }
+                else
+          {
+                Write-Host "There is no change detected in Terraform tfplan file"
+          }
+        workingDirectory: '$(System.ArtifactsDirectory)/iac_artifact'
+    
+    - task: TerraformTaskV2@2
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(System.ArtifactsDirectory)/iac_artifact'
+        environmentServiceNameAzureRM: 'Azure subscription 1(757fc6c5-fbc8-4bdd-80d5-e3faf2137870)'
+    
+    - task: Kubernetes@1
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: 'prueba'
+        namespace: 'default'
+        command: 'apply'
+        useConfigurationFile: true
+        configuration: '$(System.ArtifactsDirectory)/iac_artifact'
+        secretType: 'dockerRegistry'
+        containerRegistryType: 'Azure Container Registry'
+      
